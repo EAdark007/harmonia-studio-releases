@@ -1,0 +1,251 @@
+name: Build and release Harmonia Studio
+
+# Builds the Windows, Mac and Android apps and publishes them here as a
+# release, which installed copies pick up as an update. The app's code is
+# in a private repository; this reads it with SOURCE_TOKEN (a read-only
+# access token saved in this repository's secrets). It runs only when
+# started by hand (or by the developer's tools), never for a pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch of the app's code to build
+        default: claude/logic-pro-windows-v69b2y
+      version:
+        description: Version to release (empty = one after the latest release here)
+        required: false
+      android:
+        description: Build and release the Android app too
+        type: boolean
+        default: true
+      mac:
+        description: Build and release the Mac app too
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_REPO: EAdark007/claude
+
+jobs:
+  # The whole app is tested first; nothing is built or published if a test
+  # fails.
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      number: ${{ steps.version.outputs.number }}
+    steps:
+      - name: Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ inputs.version }}
+        run: |
+          if [ -n "$WANT" ]; then V="${WANT#v}"; else
+            LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName --jq '[.[].tagName | select(test("^v1\\.1\\.[0-9]+$")) | sub("^v1\\.1\\.";"") | tonumber] | max // 0')
+            V="1.1.$((LAST + 1))"
+          fi
+          echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "number=${V##*.}" >> "$GITHUB_OUTPUT"
+          echo "Building $V"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium for the tests
+        run: npx playwright install --with-deps chromium
+
+      - name: App tests
+        run: npm test
+
+      - name: Desktop and updater tests
+        run: xvfb-run -a npm run test:electron
+
+      - name: Android app tests (phone-sized, touch)
+        run: npm run test:mobile
+
+      - name: Release notes (the latest change's description)
+        run: git log -1 --format=%B | grep -vE '^(Co-Authored-By|Claude-Session):' | sed -E 's/ *\[(windows only|no android|skip ci)\]//' > release-notes.md
+
+      # The builds hand their files to the publish step through a draft
+      # release here (drafts aren't shown to the public).
+      - name: Open the draft that carries the builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N="build-${{ github.run_id }}"
+          gh release create "$N" --repo "$GITHUB_REPOSITORY" --draft --title "Build on its way to a release" --notes "Build files waiting to be published."
+          gh release upload "$N" --repo "$GITHUB_REPOSITORY" release-notes.md
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Set version
+        shell: bash
+        run: npm pkg set version="${{ needs.test.outputs.version }}"
+      - name: Build installer and portable exe
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Hand the Windows build to the publish step
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --clobber dist/*.exe dist/*.blockmap dist/latest.yml
+
+  # Apple silicon only, signed ad hoc, started once on the Mac runner to
+  # check it works. One that fails doesn't hold back the Windows update.
+  mac:
+    needs: test
+    if: ${{ inputs.mac }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Set version
+        run: npm pkg set version="${{ needs.test.outputs.version }}"
+      - name: Build the Mac app (dmg and zip, Apple silicon)
+        run: npx electron-builder --mac dmg zip --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check the app starts on this Mac
+        run: node tests/electron/mac-smoke.js "dist/mac-arm64/Harmonia Studio.app/Contents/MacOS/Harmonia Studio"
+      - name: Hand the Mac build to the publish step
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.dmg dist/*-mac-*.zip dist/*.blockmap dist/latest-mac.yml)
+          gh release upload "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+
+  android:
+    needs: test
+    if: ${{ inputs.android }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Set version
+        run: npm pkg set version="${{ needs.test.outputs.version }}"
+      - name: Install Capacitor
+        working-directory: mobile
+        run: npm ci
+      - name: Put the app into the Android project
+        working-directory: mobile
+        run: node prepare.js && npx cap sync android
+      - name: Build the APK (and a debug one for the emulator)
+        working-directory: mobile/android
+        env:
+          HARMONIA_VERSION: ${{ needs.test.outputs.version }}
+          HARMONIA_VERSION_CODE: ${{ needs.test.outputs.number }}
+        run: ./gradlew --no-daemon assembleRelease assembleDebug
+      - name: Name the APK
+        run: |
+          mkdir -p dist
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk "dist/HarmoniaStudio-${{ needs.test.outputs.version }}-android.apk"
+      - name: Make room for the emulator
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL
+      - name: Let the emulator use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Check the app on an Android emulator
+        timeout-minutes: 25
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          HARMONIA_VERSION: ${{ needs.test.outputs.version }}
+        with:
+          api-level: 36
+          arch: x86_64
+          target: default
+          profile: pixel_7
+          disk-size: 4096M
+          ram-size: 4096M
+          heap-size: 576M
+          disable-animations: true
+          script: node tests/mobile/emulator.js mobile/android/app/build/outputs/apk/debug/app-debug.apk shots/android-emulator.png
+      - name: Hand the Android build to the publish step
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --clobber dist/*.apk
+
+  # One release with all of them. A Mac or Android build that fails doesn't
+  # hold back the Windows update.
+  publish:
+    needs: [test, windows, mac, android]
+    if: ${{ !cancelled() && needs.windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V: ${{ needs.test.outputs.version }}
+    steps:
+      - name: Get the builds
+        run: |
+          mkdir out
+          gh release download "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --dir out
+          mv out/release-notes.md .
+          test -f out/latest.yml
+          ls -la out
+      - name: Publish the update
+        run: gh release create "v$V" --repo "$GITHUB_REPOSITORY" --title "Harmonia Studio $V" --notes-file release-notes.md --latest out/*
+      - name: Keep the latest five releases
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' \
+            | tail -n +6 \
+            | xargs -r -n1 gh release delete --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+      - name: Remove the draft that carried the builds
+        if: always()
+        run: gh release delete "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" -y || true
