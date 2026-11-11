@@ -37,6 +37,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       number: ${{ steps.version.outputs.number }}
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
       - name: Version
         id: version
@@ -59,6 +60,10 @@ jobs:
           ref: ${{ inputs.ref }}
           token: ${{ secrets.SOURCE_TOKEN }}
           persist-credentials: false
+      # Every build uses this same commit, even if the branch moves on meanwhile.
+      - name: Commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -100,7 +105,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.test.outputs.sha }}
           token: ${{ secrets.SOURCE_TOKEN }}
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -132,7 +137,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.test.outputs.sha }}
           token: ${{ secrets.SOURCE_TOKEN }}
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -165,7 +170,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.test.outputs.sha }}
           token: ${{ secrets.SOURCE_TOKEN }}
           persist-credentials: false
       - uses: actions/setup-node@v4
