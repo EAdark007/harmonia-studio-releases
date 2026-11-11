@@ -73,8 +73,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The runner already has the libraries a browser needs; only the
+      # browser is downloaded (tried three times), and the system packages
+      # are fetched only if it then won't start.
       - name: Install Chromium for the tests
-        run: npx playwright install --with-deps chromium
+        run: |
+          for i in 1 2 3; do npx playwright install chromium && break; sleep 15; done
+          node -e "require('playwright').chromium.launch().then(b => b.close())" || { sudo apt-get update -o Acquire::Retries=5 || true; npx playwright install-deps chromium; }
 
       - name: App tests
         run: npm test
