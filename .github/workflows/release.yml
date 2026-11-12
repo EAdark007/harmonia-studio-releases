@@ -46,13 +46,19 @@ jobs:
           WANT: ${{ inputs.version }}
         run: |
           if [ -n "$WANT" ]; then V="${WANT#v}"; else
-            LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName --jq '[.[].tagName | select(test("^v1\\.1\\.[0-9]+$")) | sub("^v1\\.1\\.";"") | tonumber] | max // 0')
-            V="1.1.$((LAST + 1))"
+            # one after the newest release here, whatever its major version
+            LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName --jq '[.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v";"") | split(".") | map(tonumber)] | max // [1,1,0] | map(tostring) | join(".")')
+            V="${LAST%.*}.$(( ${LAST##*.} + 1 ))"
           fi
           echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'
+          IFS=. read -r MA MI PA <<< "$V"
+          # Android's version code must always go up: the 1.1 releases used
+          # their last number (up to 84); from 2.0 on it's major * 1000000 +
+          # minor * 1000 + patch (2.0.0 is 2000000)
+          if [ "$MA" -ge 2 ]; then N=$(( MA * 1000000 + MI * 1000 + PA )); else N="$PA"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "number=${V##*.}" >> "$GITHUB_OUTPUT"
-          echo "Building $V"
+          echo "number=$N" >> "$GITHUB_OUTPUT"
+          echo "Building $V (Android version code $N)"
 
       - uses: actions/checkout@v4
         with:
