@@ -1,7 +1,9 @@
 name: Build and release Harmonia Studio
 
-# Builds the Windows, Mac and Android apps and publishes them here as a
-# release, which installed copies pick up as an update. The app's code is
+# Builds the Windows, Mac and Android apps, and Harmonia Live (the stage
+# app, Windows), and publishes them here as one release, which installed
+# copies pick up as an update (Studio's from latest.yml, Live's from
+# live.yml). The app's code is
 # in a private repository; this reads it with SOURCE_TOKEN (a read-only
 # access token saved in this repository's secrets). It runs only when
 # started by hand (or by the developer's tools), never for a pull request.
@@ -132,11 +134,31 @@ jobs:
         run: npx electron-builder --win --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # Harmonia Live: the same code, started as its own app, with its own
+      # installer (HarmoniaLive-Setup-<version>.exe) and update file (live.yml)
+      - name: Build Harmonia Live
+        if: ${{ hashFiles('electron-builder.live.json') != '' }}
+        run: npx electron-builder --config electron-builder.live.json --win --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # (started once here to check it runs; a runner without a sound card
+      # or a screen can't stand for a real computer, so it informs, not blocks)
+      - name: Check Harmonia Live starts
+        if: ${{ hashFiles('tests/electron/live-smoke.js') != '' }}
+        continue-on-error: true
+        run: node tests/electron/live-smoke.js "dist-live/win-unpacked/Harmonia Live.exe"
       - name: Hand the Windows build to the publish step
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --clobber dist/*.exe dist/*.blockmap dist/latest.yml
+        run: |
+          files=(dist/*.exe dist/*.blockmap dist/latest.yml)
+          if [ -d dist-live ]; then
+            ls -la dist-live
+            files+=(dist-live/*.exe dist-live/*.blockmap)
+            for y in dist-live/live*.yml; do [ -f "$y" ] && files+=("$y"); done
+          fi
+          gh release upload "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
 
   # Apple silicon only, signed ad hoc, started once on the Mac runner to
   # check it works. One that fails doesn't hold back the Windows update.
@@ -256,7 +278,10 @@ jobs:
           test -f out/latest.yml
           ls -la out
       - name: Publish the update
-        run: gh release create "v$V" --repo "$GITHUB_REPOSITORY" --title "Harmonia Studio $V" --notes-file release-notes.md --latest out/*
+        run: |
+          TITLE="Harmonia Studio $V"
+          if ls out/HarmoniaLive-Setup-*.exe >/dev/null 2>&1; then TITLE="Harmonia Studio and Harmonia Live $V"; fi
+          gh release create "v$V" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file release-notes.md --latest out/*
       - name: Keep the latest five releases
         run: |
           gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' \
