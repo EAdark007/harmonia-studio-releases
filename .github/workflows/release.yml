@@ -95,6 +95,22 @@ jobs:
       - name: Desktop and updater tests
         run: xvfb-run -a npm run test:electron
 
+      # VST3 plug-ins: the plug-in host (native/plughost) built here with the
+      # VST3 SDK's example plug-ins and a plug-in that crashes on purpose,
+      # then tested: the host itself, and the app hosting them end to end
+      - name: The VST3 SDK (cached)
+        if: ${{ hashFiles('native/plughost/CMakeLists.txt') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: native/plughost/vst3sdk
+          key: vst3sdk-v3.8.0_build_66
+      - name: VST3 plug-in host tests
+        if: ${{ hashFiles('native/plughost/CMakeLists.txt') != '' }}
+        run: |
+          node scripts/build-plughost.js --tests
+          node tests/native/plughost.js
+          xvfb-run -a node tests/electron/vst.js
+
       - name: Android app tests (phone-sized, touch)
         run: npm run test:mobile
 
@@ -130,10 +146,28 @@ jobs:
       - name: Set version
         shell: bash
         run: npm pkg set version="${{ needs.test.outputs.version }}"
+      # VST3 plug-ins: harmonia-plughost.exe (CMake + MSVC, the VST3 SDK at a
+      # pinned tag), staged in native/plughost/stage, which electron-builder
+      # bundles as resources/plughost (package.json ▸ build ▸ extraResources)
+      - name: The VST3 SDK (cached)
+        if: ${{ hashFiles('native/plughost/CMakeLists.txt') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: native/plughost/vst3sdk
+          key: vst3sdk-v3.8.0_build_66-win
+      - name: Build the VST3 plug-in host
+        if: ${{ hashFiles('native/plughost/CMakeLists.txt') != '' }}
+        run: node scripts/build-plughost.js --stage
       - name: Build installer and portable exe
         run: npx electron-builder --win --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check the plug-in host is in the app
+        if: ${{ hashFiles('native/plughost/CMakeLists.txt') != '' }}
+        shell: bash
+        run: |
+          ls -la dist/win-unpacked/resources/plughost
+          dist/win-unpacked/resources/plughost/harmonia-plughost.exe --version
       # Harmonia Live: the same code, started as its own app, with its own
       # installer (HarmoniaLive-Setup-<version>.exe) and update file (live.yml)
       - name: Build Harmonia Live
@@ -290,3 +324,4 @@ jobs:
       - name: Remove the draft that carried the builds
         if: always()
         run: gh release delete "build-${{ github.run_id }}" --repo "$GITHUB_REPOSITORY" -y || true
+        
